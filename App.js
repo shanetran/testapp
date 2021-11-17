@@ -2,7 +2,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-var httpBridge = require('react-native-app-server')
+import httpBridge from 'react-native-http-bridge';
+
 import {
   DeviceEventEmitter, TextInput,
   SafeAreaView,
@@ -28,23 +29,28 @@ const App = () => {
   const isDarkMode = useColorScheme() === 'dark';
 
   useEffect(() => {
-    httpBridge.start(5000, "http_service", function(request) {
+    httpBridge.start(40030, 'http_service', function (request) {
+      // you can use request.url, request.type and request.postData here
       if (request.type === "GET" && request.url.split("/")[1] === "users") {
-        httpBridge.respond(200, "application/json", "{\"message\": \"This is test OK\"}");
+        httpBridge.respond(request.requestId, 200, "application/json", "{\"message\": \"OK\"}");
       } else {
-        httpBridge.respond(400, "application/json", "{\"message\": \"Tested Bad Request\"}");
+        httpBridge.respond(request.requestId, 400, "application/json", "{\"message\": \"Bad Request\"}");
       }
     });
-    return () => httpBridge.stop()
-  }, [])
+    return () => {
+      httpBridge.stop();
+    }
+  }, []);
 
 
   function handleRequest() {
-    axios.get(`${ipAddress}/users`)
+    console.log('ipAddress', ipAddress);
+    axios.get(`http://${ipAddress}:40030/users`)
     .then(function (response) {
       setMessage("Success")
     })
     .catch(function (error) {
+      // console.log('err', JSON.stringify(error))
       setMessage("Error")
     })
   }
@@ -66,7 +72,8 @@ const App = () => {
             <TextInput 
               style={{borderWidth: 1}}
               value={ipAddress}
-              onChange={e => setIpAddress(e.target.value)}
+              onChangeText={setIpAddress}
+              placeholder='172.20.10.1'
             />
             <TouchableOpacity 
               style={{borderRadius: 4, borderWidth: 1, justifyContent: "center", alignItems: "center", marginTop: 10, padding: 6}} 
