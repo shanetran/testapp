@@ -1,7 +1,7 @@
 import {synchronize} from '@nozbe/watermelondb/sync';
-import {database} from '../db/database';
-import Todo from '../model/todo';
-import {DateTime} from 'luxon';
+import axios from 'axios';
+import {Q} from '@nozbe/watermelondb';
+
 
 // your_local_machine_ip_address usually looks like 192.168.0.x
 // on *nix system, you would find it out by running the ifconfig command
@@ -10,95 +10,160 @@ const SYNC_API_URL = 'http://<your_local_machine_ip_address>:40030/sync';
 export function buildSyncApiUrl({ip, port = 40030, online = false}) {
   if (online) return SYNC_API_URL;
 
-  return `http://${ip}:${port}/sync`;
+  return `http://${ip}:${port}`;
 }
 
-export async function sync(syncApiUrl) {
-  await synchronize({
-    database,
-    pullChanges: async ({lastPulledAt}) => {
-      const response = await fetch(syncApiUrl, {
-        body: JSON.stringify({lastPulledAt}),
-      });
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
+export async function sync(database, syncApiUrl) {
+  console.log('Begin syncing...');
 
-      const {changes, timestamp} = await response.json();
-      return {changes, timestamp};
-    },
-    pushChanges: async ({changes, lastPulledAt}) => {
-      const response = await fetch(
-        `${syncApiUrl}?lastPulledAt=${lastPulledAt}`,
-        {
-          method: 'POST',
-          body: JSON.stringify(changes),
-        },
-      );
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-    },
-  });
+  try {
+    await synchronize({
+      database,
+      pullChanges: async ({lastPulledAt = 1}) => {
+        try {
+          const response = await axios.post(`${syncApiUrl}/pull`, {lastPulledAt});
+          const {changes = {}, timestamp = 1} = response.data;
+          return {changes, timestamp};
+        } catch (err) {
+          console.log('Pull changes error', JSON.stringify(err));
+          return {changes: {}, timestamp: lastPulledAt};
+        }
+      },
+      pushChanges: async ({changes, lastPulledAt = 1}) => {
+        try {
+          const response = await axios.post(`${syncApiUrl}/push`, {changes, lastPulledAt});
+        } catch (err) {
+          console.log('Push changes error', JSON.stringify(err));
+        }
+      },
+      sendCreatedAsUpdated: true,
+    });
+  } catch (err) {}
+  console.log('Sync done...');
 }
 
-export async function pull(request) {
-  console.log('pull request', request)
-  const changes = request.postData['changes'] || {};
+async function applyChanges(changes, database) {
+  let created = [];
+  let updated = [];
+  let deleted = [];
 
   if (changes?.todos?.created?.length > 0) {
-    await Todo.createMany(
-      changes.todos.created
-        .filter(remoteEntry => remoteEntry.created_at)
-        .map(remoteEntry => ({
-          todo: remoteEntry.todo,
-          completed: remoteEntry.completed,
-          watermelonId: remoteEntry.id,
-          createdAt: DateTime.fromMillis(parseInt(remoteEntry.created_at)),
-        })),
-    );
+    created = changes.todos.created;
   }
 
   if (changes?.todos?.updated?.length > 0) {
-    const updateQueries = changes.todos.updated.map(remoteEntry => {
-      return Todo.query().where('watermelonId', remoteEntry.id).update({
-        todo: remoteEntry.todo,
-        completed: remoteEntry.completed,
-      });
-    });
-    await Promise.all(updateQueries);
+    updated = changes.todos.updated;
   }
 
   if (changes?.todos?.deleted?.length > 0) {
-    await Todo.query().where('watermelon_id', changes.todos.deleted).exec();
+    deleted = changes.todos.deleted;
   }
+
+  await database.write(async () => {
+    await Promise.all(created.map(async remoteEntry => {
+      let todo = null;
+      try {
+        todo = await database.get('todos').find(remoteEntry.id);
+      } catch (err) { }
+
+      if (!todo) {
+        console.log('Create todo', remoteEntry)
+        await database.get('todos').create(t => {
+          if (remoteEntry.id) {
+            t._raw.id = remoteEntry.id;
+          }
+          t.title = remoteEntry.title;
+        })
+      } else {
+        await todo.update(t => {
+          t.title = remoteEntry.title;
+        });
+      }
+    }));
+
+    await Promise.all(updated.map(async remoteEntry => {
+      let todo = null;
+      try {
+        todo = await database.get('todos').find(remoteEntry.id);
+      } catch (err) { }
+
+      if (!todo) {
+        await database.get('todos').create(t => {
+          if (remoteEntry.id) {
+            t._raw.id = remoteEntry.id;
+          }
+          t.title = remoteEntry.title;
+        })
+      } else {
+        await todo.update(t => {
+          t.title = remoteEntry.title;
+        });
+      }
+    }));
+
+    await Promise.all(deleted.map(async deletingId => {
+      let todo = null;
+      try {
+        todo = await database.get('todos').find(deletingId);
+      } catch (err) { }
+
+      if (todo) {
+        await todo.destroyPermanently();
+      }
+    }));
+  });
+}
+
+export async function pull(request, database) {
+  const body = request.postData ? JSON.parse(request.postData) : {};
+  const {changes} = body;
+  await applyChanges(changes, database);
 }
 
 function getSafeLastPulledAt(request) {
-  const lastPulledAt = request.postData['lastPulledAt'];
-  if (lastPulledAt !== 'null') {
-    return DateTime.fromMillis(parseInt(lastPulledAt)).toString();
+  const body = request.postData ? JSON.parse(request.postData) : {};
+  const {lastPulledAt} = body;
+  if (lastPulledAt && lastPulledAt !== 'null') {
+    return new Date(parseInt(lastPulledAt)).getTime();
   }
-  return DateTime.fromMillis(1).toString();
+  try {
+    const timestamp = new Date(1).getTime();
+    return timestamp;
+  } catch (err) {
+    console.log('getSafeLastPulledAt', JSON.stringify(err));
+    return 0;
+  }
 }
 
-export async function push(request) {
-  console.log('push request', request)
+export async function push(request, database) {
   const lastPulledAt = getSafeLastPulledAt(request);
-  const created = await Todo.query()
-    .where('created_at', '>', lastPulledAt)
-    .exec();
-  const updated = await Todo.query()
-    .where('updated_at', '>', lastPulledAt)
-    .exec();
-  return {
-    changes: {
-      todos: {
-        created,
-        updated,
-        deleted: [],
+  try {
+    let updated = await database.get('todos').query(Q.where('updated_at', Q.gt(lastPulledAt))).fetch();
+
+    updated = updated.map(({_raw}) => {
+      return {
+        id: _raw.id,
+        title: _raw.title,
+        created_at: _raw.created_at,
+        updated_at: _raw.updated_at,
+      };
+    });
+
+    return {
+      changes: {
+        todos: {
+          created: [],
+          updated,
+          deleted: [],
+        },
       },
-    },
-    timestamp: Date.now(),
-  };
+      timestamp: new Date().getTime(),
+    };
+  } catch (err) {
+    console.log(err);
+    return {
+      changes: {},
+      timestamp: new Date().getTime(),
+    };
+  }
 }

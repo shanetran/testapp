@@ -5,7 +5,11 @@ export default appSchema({
   tables: [
     tableSchema({
       name: 'todos',
-      columns: [{name: 'title', type: 'string'}],
+      columns: [
+        {name: 'title', type: 'string'},
+        {name: 'created_at', type: 'number'},
+        {name: 'updated_at', type: 'number'},
+      ],
     }),
   ],
 });

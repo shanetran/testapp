@@ -6,11 +6,15 @@ import {
 export default schemaMigrations({
   migrations: [
     {
-      toVersion: 2,
+      toVersion: 4,
       steps: [
         createTable({
           name: 'todos',
-          columns: [{name: 'title', type: 'string'}],
+          columns: [
+            {name: 'title', type: 'string'},
+            {name: 'created_at', type: 'number'},
+            {name: 'updated_at', type: 'number'},
+          ],
         }),
       ],
     },

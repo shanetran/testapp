@@ -1,6 +1,6 @@
 import {Database} from '@nozbe/watermelondb';
 import SQLiteAdapter from '@nozbe/watermelondb/adapters/sqlite';
-import Todo from '../model/todo';
+import Todo from '../model/Todo';
 import publicSchema from './schema';
 
 const adapter = new SQLiteAdapter({
@@ -10,5 +10,4 @@ const adapter = new SQLiteAdapter({
 export const db = new Database({
   adapter,
   modelClasses: [Todo],
-  actionsEnabled: true,
 });
