@@ -1,4 +1,5 @@
 import React, {useState, useEffect} from 'react';
+import axios from 'axios';
 import httpBridge from 'react-native-http-bridge';
 import migrations from './db/migrations';
 import withObservables from '@nozbe/with-observables';
@@ -21,8 +22,6 @@ import {Colors} from 'react-native/Libraries/NewAppScreen';
 import {Database} from '@nozbe/watermelondb';
 import SQLiteAdapter from '@nozbe/watermelondb/adapters/sqlite';
 import publicSchema from './db/schema';
-import useWifi from './src/wifi';
-import useServer from './src/server';
 
 const adapter = new SQLiteAdapter({
   schema: publicSchema,
@@ -33,36 +32,72 @@ const database = new Database({
   modelClasses: [Todo],
 });
 
-import {sync, buildSyncApiUrl} from './src/sync';
+import {sync, buildSyncApiUrl, pull, push} from './src/sync';
 
 const App = () => {
   const todoCollection = database.collections.get('todos');
+
+  const [ipAddress, setIpAddress] = useState(null);
   const [message, setMessage] = useState(null);
   const [inputValue, setInputValue] = useState(null);
-  const [syncing, setSyncing] = useState(false);
-  const {server} = useServer(database);
-  const {scan, isScanning, ipAddresses, currentIpAddress} = useWifi();
+  const [syncing, setSyncing] = useState(false)
 
   const isDarkMode = useColorScheme() === 'dark';
 
+  useEffect(() => {
+    httpBridge.start(40030, 'http_service', async function (request) {
+      // you can use request.url, request.type and request.postData here
+      if (request.type === 'POST' && request.url.split('/')[1] === 'pull') {
+        // handle pull data
+        try {
+          const result = await push(request, database);
+          httpBridge.respond(
+            request.requestId,
+            200,
+            'application/json',
+            JSON.stringify(result),
+          );
+        } catch (err) {
+          httpBridge.respond(
+            request.requestId,
+            400,
+            'application/json',
+            JSON.stringify({err}),
+          );
+        }
+      } else if (
+        request.type === 'POST' &&
+        request.url.split('/')[1] === 'push'
+      ) {
+        // handle push data
+        await pull(request, database);
+        httpBridge.respond(
+          request.requestId,
+          200,
+          'application/json',
+          JSON.stringify({message: 'push data'}),
+        );
+      } else {
+        httpBridge.respond(
+          request.requestId,
+          404,
+          'application/json',
+          JSON.stringify({message: 'Not found'}),
+        );
+      }
+    });
+    return () => {
+      httpBridge.stop();
+    };
+  }, []);
+
   async function handleSync() {
     if (syncing) return;
-    setSyncing(true);
-    try {
-      await Promise.all(
-        ipAddresses.map(async ipAddress => {
-          try {
-            const syncApiUrl = buildSyncApiUrl({ip: ipAddress});
-            await sync(database, syncApiUrl);
-          } catch (err) {
-            console.log(err);
-          }
-        }),
-      );
-    } catch (err) {
-      console.log('handle sync error', err);
-    }
-    setSyncing(false);
+    if (!ipAddress) return;
+    const syncApiUrl = buildSyncApiUrl({ip: ipAddress});
+    setSyncing(true)
+    await sync(database, syncApiUrl);
+    setSyncing(false)
   }
 
   async function handleNew() {
@@ -96,8 +131,14 @@ const App = () => {
           style={{
             backgroundColor: isDarkMode ? Colors.black : Colors.white,
           }}>
-          <Text>Current IP: {currentIpAddress}</Text>
-          <View style={{marginTop: 30}}>
+          <View style={{paddingTop: 50}}>
+            <Text>IP</Text>
+            <TextInput
+              style={{borderWidth: 1}}
+              value={ipAddress}
+              onChangeText={setIpAddress}
+              placeholder='192.168.0.1'
+            />
             <TouchableOpacity
               style={{
                 borderRadius: 4,
@@ -107,26 +148,12 @@ const App = () => {
                 marginTop: 10,
                 padding: 6,
               }}
-              disabled={isScanning}
-              onPress={scan}>
-              <Text>{isScanning ? 'Scanning...' : 'Scan'}</Text>
+              disabled={syncing || !ipAddress}
+              onPress={handleSync}>
+              <Text>{syncing ? 'Syncing...' : 'Sync'}</Text>
             </TouchableOpacity>
-            <Text style={{ marginTop: 5, marginBottom: 5 }}>Local devices:</Text>
-            <View style={{flex: 1, marginBottom: 10}}>
-              {ipAddresses.map(ipAddress => {
-                return (
-                  <View
-                    key={ipAddress}
-                    style={{
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      flexDirection: 'row',
-                      marginBottom: 6,
-                    }}>
-                    <Text>{ipAddress}</Text>
-                  </View>
-                );
-              })}
+            <View>
+              <Text>{message}</Text>
             </View>
           </View>
           <View>
@@ -178,19 +205,6 @@ const App = () => {
                 </Text>
               </TouchableOpacity>
             </View>
-            <TouchableOpacity
-              style={{
-                borderRadius: 4,
-                borderWidth: 1,
-                justifyContent: 'center',
-                alignItems: 'center',
-                marginTop: 10,
-                padding: 6,
-              }}
-              disabled={syncing}
-              onPress={handleSync}>
-              <Text>{syncing ? 'Syncing...' : 'Sync'}</Text>
-            </TouchableOpacity>
             <EnhancedTodoList
               todoCollection={todoCollection}
               handleDelete={handleDelete}
@@ -204,52 +218,37 @@ const App = () => {
 
 function TodoItem({todo, handleDelete}) {
   return (
-    <View
-      style={{
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        flexDirection: 'row',
-        marginBottom: 6,
-      }}>
-      <Text style={{fontSize: 10}}>{todo.id}</Text>
+    <View style={{justifyContent: "space-between", alignItems: "center", flexDirection: "row", marginBottom: 6}}>
+      <Text style={{ fontSize: 10 }}>{todo.id}</Text>
       <Text style={{fontSize: 18}}>{todo.title}</Text>
-      <TouchableOpacity onPress={handleDelete.bind(this, todo)}>
-        <Text style={{fontWeight: 'bold', color: '#c00'}}>Delete</Text>
+      <TouchableOpacity
+        onPress={handleDelete.bind(this, todo)}
+      >
+        <Text style={{fontWeight: "bold", color: "#c00"}}>Delete</Text>
       </TouchableOpacity>
     </View>
-  );
+  )
 }
 
 const EnhancedTodoItem = withObservables(['todo'], ({todo}) => ({
   todo: todo.observe(),
 }))(TodoItem);
 
-function TodoList({todos, handleDelete}) {
+function TodoList ({todos, handleDelete}) {
   return (
     <View style={{marginVertical: 20}}>
-      <Text
-        style={{
-          fontWeight: 'bold',
-          fontSize: 20,
-          color: '#008378',
-        }}>
-        Todo List
-      </Text>
+      <Text style={{fontWeight: "bold", fontSize: 20, color: "#008378"}}>Todo List</Text>
       {todos && todos.length > 0 ? (
         <View style={{paddingTop: 10}}>
           {todos.map(todo => (
-            <EnhancedTodoItem
-              key={todo.id}
-              todo={todo}
-              handleDelete={handleDelete}
-            />
+            <EnhancedTodoItem key={todo.id} todo={todo} handleDelete={handleDelete} />
           ))}
         </View>
-      ) : (
-        <Text style={{textAlign: 'center'}}>Empty.</Text>
+      ): (
+        <Text style={{textAlign: "center"}}>Empty.</Text>
       )}
     </View>
-  );
+  )
 }
 
 const EnhancedTodoList = withObservables([], ({todoCollection}) => ({
